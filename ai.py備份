@@ -1,0 +1,128 @@
+import os
+import asyncio
+import discord
+from discord.ext import commands
+from discord import app_commands
+from openai import AsyncOpenAI
+
+class AIChat(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        groq_key = os.getenv("GROQ_API_KEY")
+        if not groq_key:
+            print("⚠️ 警告：未偵測到環境變數 GROQ_API_KEY，Rasazy 將無法聊天！")
+            
+        # 🟢 核心修正：加入 max_retries=0，防止 OpenAI SDK 遇到 429 限制時在後台自動狂戳重試
+        self.ai_client = AsyncOpenAI(
+            base_url="https://api.groq.com/openai/v1",  
+            api_key=groq_key,
+            max_retries=0
+        )
+        self.model_name = "openai/gpt-oss-120b"
+        self.channel_memories = {}
+        # 🛡️ 新增：頻道鎖，防止同一個頻道有多人同時標記時，訊息重疊發送引爆 429
+        self.channel_locks = {}
+
+    def get_channel_lock(self, channel_id: int) -> asyncio.Lock:
+        """動態獲取或建立頻道的非同步鎖"""
+        if channel_id not in self.channel_locks:
+            self.channel_locks[channel_id] = asyncio.Lock()
+        return self.channel_locks[channel_id]
+
+    @app_commands.command(name="ai", description="向 Rasazy 提問（全頻道共享記憶與認人）")
+    async def ai_command(self, interaction: discord.Interaction, question: str):
+        await interaction.response.defer()
+        channel_id = interaction.channel_id
+        user_name = interaction.user.display_name
+
+        # 使用鎖，確保同頻道內 AI 回覆是一對一依序處理
+        async with self.get_channel_lock(channel_id):
+            reply = await self.process_shared_ai_chat(channel_id, user_name, question)
+            
+        await interaction.followup.send(reply)
+
+    @app_commands.command(name="reset", description="清除目前頻道的 AI 對話記憶")
+    async def ai_reset_command(self, interaction: discord.Interaction):
+        channel_id = interaction.channel_id
+        if channel_id in self.channel_memories:
+            del self.channel_memories[channel_id]
+            await interaction.response.send_message("🧹 成功清除「本頻道」的全體 AI 歷史記憶！大家可以重新開始建立話題。")
+        else:
+            await interaction.response.send_message("目前這個頻道本來就沒有留存 any 集體記憶喔。")
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        # 🟢 核心修正 1：過濾掉「所有機器人」，防止其他機器人標記時觸發異常
+        if message.author.bot:
+            return
+
+        # 檢查機器人是否真的被標記
+        if self.bot.user in message.mentions:
+            # 🛡️ 優化：移除所有標記符號，相容新舊格式
+            clean_question = message.content
+            for mention in message.mentions:
+                clean_question = clean_question.replace(mention.mention, "")
+            clean_question = clean_question.replace(f'<@!{self.bot.user.id}>', '').strip()
+            
+            # 🟢 已經刪除空訊息攔截：即使 clean_question 為空，也會繼續往下走丟給 Groq AI 處理！
+
+            channel_id = message.channel.id
+            user_name = message.author.display_name
+
+            # 🛡️ 核心修正 2：利用 asyncio.Lock 進行頻道排隊
+            # 當 A 用戶的訊息正在被 Groq 處理時，B 用戶的標記會自動排隊等待，絕不引爆 429
+            async with self.get_channel_lock(channel_id):
+                reply = await self.process_shared_ai_chat(channel_id, user_name, clean_question)
+                
+                # 🛠️ 照你的需求：如果觸發敏感詞，這裡會拿到「我無法回答這個問題」，但如果未來有漏網之魚，
+                # 這裡補上 allowed_mentions=discord.AllowedMentions(everyone=False, roles=False) 雙重保險！
+                try:
+                    await message.reply(
+                        reply, 
+                        mention_author=False, 
+                        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
+                    )
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:
+                        print(f"⚠️ 偵測到 Discord 429 限制，正在丟棄該次重複請求。")
+
+    async def process_shared_ai_chat(self, channel_id: int, user_name: str, question: str) -> str:
+        try:
+            if channel_id not in self.channel_memories:
+                self.channel_memories[channel_id] = [
+                    {
+                        "role": "system", 
+                        "content": "許多不同的人會同時在同一個頻道與你聊天。請仔細閱讀歷史紀錄中的[發言者標籤]，並根據上下文與對應的人連續對話。你的名字叫Rasazy，請使用活潑可愛的語氣說話，並加入顏文字，例如 o(≧▽≦)o、(っ °Д °;)っ、(*/ω＼*) 等。。"
+                    }
+                ]
+            
+            formatted_question = f"[{user_name} 說了]: {question}"
+            self.channel_memories[channel_id].append({"role": "user", "content": formatted_question})
+
+            # 🟢 記憶 Bug 完美修正：確保 system_msg 只精準抓取第 0 個元素的字典，記憶才不會巢狀損壞！
+            if len(self.channel_memories[channel_id]) > 6:
+                system_msg = self.channel_memories[channel_id][0]  # 👈 這裡精準加上了 [0]
+                recent_msgs = self.channel_memories[channel_id][-5:]
+                self.channel_memories[channel_id] = [system_msg] + recent_msgs
+
+            completion = await self.ai_client.chat.completions.create(
+                model=self.model_name,
+                messages=self.channel_memories[channel_id]
+            )
+            
+            # 🟢 修正 Bug：補上 .choices[0] 確保能正常讀取 Groq 文字
+            reply = completion.choices[0].message.content
+
+            self.channel_memories[channel_id].append({"role": "assistant", "content": reply})
+
+            if len(reply) > 1950:
+                reply = reply[:1950] + "\n\n*(訊息過長已自動截斷)*"
+
+            return reply
+
+        except Exception as e:
+            print(f"❌ Groq 核心連線發生錯誤: {e}")
+            return f"❌ 發生錯誤，原因為：`{e}`"
+
+async def setup(bot):
+    await bot.add_cog(AIChat(bot))
