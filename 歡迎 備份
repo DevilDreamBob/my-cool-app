@@ -1,0 +1,250 @@
+import json
+import os
+import random
+import datetime
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+
+class Welcome(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.settings = {}
+        self.file_path = "welcome.json"
+        
+        # 開機時載入設定檔至記憶體快取
+        self.load_settings()
+
+    def load_settings(self):
+        """同步載入：僅在機器人启动時執行一次"""
+        if not os.path.exists(self.file_path):
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                json.dump({}, f)
+        with open(self.file_path, "r", encoding="utf-8") as f:
+            self.settings = json.load(f)
+
+    def save_settings(self):
+        """同步寫入：當管理員修改設定時由指令觸發，不影響即時聊天效能"""
+        with open(self.file_path, "w", encoding="utf-8") as f:
+            json.dump(self.settings, f, indent=4, ensure_ascii=False)
+
+    def get_guild_settings(self, guild_id):
+        """確保各伺服器的初始設定字典結構完整（轉為字串以相容 JSON 鍵名）"""
+        gid = str(guild_id)
+        if gid not in self.settings:
+            # 👑 預設關閉：將 "join" 與 "remove" 的預設值改為 False
+            self.settings[gid] = {
+                "join": False,          # 預設不開啟歡迎加入通知
+                "remove": False,        # 預設不開啟成員離開通知
+                "min_age_days": 0       # 預設為 0 天，代表關閉新帳號審核
+            }
+        return self.settings[gid]
+
+    def resolve_channel(self, guild, setting_value):
+        """核心演算法：解析儲存值，判斷該傳送到哪，或是已經被取消"""
+        if setting_value is False:
+            return None # 使用者主動取消或預設關閉，返回 None 代表不發送訊息
+            
+        if setting_value == "SYSTEM":
+            return guild.system_channel # 預設回歸系統頻道
+            
+        # 若是自訂的頻道 ID，嘗試抓取實體物件
+        try:
+            custom_channel = guild.get_channel(int(setting_value))
+            return custom_channel if custom_channel is not None else guild.system_channel
+        except (ValueError, TypeError):
+            return guild.system_channel
+
+    # 👑 新成員加入事件
+    @commands.Cog.listener()
+    async def on_member_join(self, member):  
+        cfg = self.get_guild_settings(member.guild.id)
+        
+        # === 🚨 新帳號審核攔截機制 ===
+        min_days = cfg.get("min_age_days", 0)
+        if min_days > 0:
+            # 計算帳號創建至今的天數（必須使用帶有時區的 UTC 時間對比）
+            now = datetime.datetime.now(datetime.timezone.utc)
+            account_age = now - member.created_at
+            
+            if account_age.days < min_days:
+                # 取得發送通知的頻道
+                channel = self.resolve_channel(member.guild, cfg["join"])
+                
+                # 計算需要禁言的天數（Discord 官方 API 的 Timeout 上限為 28 天）
+                mute_days = min(min_days, 28)
+                mute_duration = datetime.timedelta(days=mute_days)
+                
+                try:
+                    # 執行官方內建 Timeout 禁言
+                    await member.timeout(mute_duration, reason=f"帳號過新（創帳僅 {account_age.days} 天），未滿設定的 {min_days} 天")
+                except discord.Forbidden:
+                    print(f"❌ 錯誤：機器人權限不足，無法在 {member.guild.name} 禁言成員 {member.name}。")
+                
+                # 準備發送給版主審核的 Embed 警告通知
+                if channel is not None:
+                    created_timestamp = int(member.created_at.timestamp())
+                    embed = discord.Embed(
+                        title="⚠️ 新成員帳號過新！已啟動暫時審核機制",
+                        description=f"新加入的成員 {member.mention} 帳號年齡未達標，已自動執行禁言隔離。",
+                        color=discord.Color.orange()
+                    )
+                    embed.add_field(name="👤 成員名稱", value=f"{member.name} ({member.id})", inline=False)
+                    embed.add_field(name="📅 帳號創建時間", value=f"<t:{created_timestamp}:F> (<t:{created_timestamp}:R>)", inline=False)
+                    embed.add_field(name="⏳ 當前帳號年齡", value=f"` {account_age.days} ` 天", inline=True)
+                    embed.add_field(name="🛡️ 伺服器門檻", value=f"` {min_days} ` 天", inline=True)
+                    embed.add_field(name="🔇 自動禁言懲處", value=f"已暫時執行隔離 ` {mute_days} ` 天，請版主/管理員盡速手動審核！", inline=False)
+                    embed.set_thumbnail(url=member.display_avatar.url)
+                    
+                    try:
+                        await channel.send(embed=embed)
+                    except discord.Forbidden:
+                        print(f"❌ 錯誤：無法在 {member.guild.name} 發送審核 Embed。")
+                return # 📌 觸發審核後直接中斷，不發送一般正常的隨機歡迎訊息
+
+        # === 正常加入的成員走原本的歡迎流程 ===
+        channel = self.resolve_channel(member.guild, cfg["join"])
+        if channel is not None:
+            s = [
+                "你好你好啊,歡迎加入(❁´◡`❁)",
+                "阿阿阿阿阿又有新成員掉進來了☆*: .｡. o(≧▽≦)o .｡.:*☆",
+                "阿阿阿阿歡迎歡迎╰(*°▽°*)╯",
+                "歡迎加入！快來跟大家打個招呼吧🌟(✨▽✨)",
+                "喔吼！千呼萬喚始出来，你終於來了(ﾉ>ω<)ﾉ",
+                "叮咚！有一位可愛的新朋友送達囉(◍•ᴗ•◍)❤️",
+                "新成員貼貼！這裡的人都很友善喔(๑´ㅂ`๑)",
+                "呼哇～歡迎你呀，快找個舒服的地方坐坐吧(☁️•͈ᴗ•͈)",
+                "歡迎來到神秘基地，請出示你的可愛通行證🔑(🌸•ω•🌸)",
+                "有新人！大家快把好吃的藏起來(✖﹏✖)",
+                "太棒了！我們的聊天分母又增加了(📢°▽°)📢",
+                "歡迎加入！這裡怪人很多，你很快就會習慣了( •̀ ω •́ )"        
+            ]
+            e = random.choice(s)
+            try:
+                await channel.send(f"{member.mention} {e}")
+            except discord.Forbidden:
+                print(f"❌ 錯誤：無法在 {member.guild.name} 的 #{channel.name} 傳送歡迎訊息。")
+    # 👑 成員離開事件
+    @commands.Cog.listener()
+    async def on_member_remove(self, member):  
+        cfg = self.get_guild_settings(member.guild.id)
+        channel = self.resolve_channel(member.guild, cfg["remove"])
+        if channel is not None:
+            d = ["不要走.·´¯`(>▂<)´¯`·. ", "離開了伺服器〒▽〒", "為甚麼要離開? இ௰இ","空蕩蕩的...這裡少了一顆星星( •̥́ ˍ •̀ू )","咦？你怎麼突然不見了(っ °Д °;)っ","默默流淚，希望下次還能再見到你( ´•̥×•̥` )","門在右邊慢走不送，開玩笑的～一路上小心喔( •̀ ω •́ )✧","風吹雞蛋殼，財去人安樂，他飛走了🕊️(°▽°)","警報響起！有人越獄成功啦📢(✖﹏✖)","揮揮小手，祝你旅途一路順風唷(ノд`)"]
+            l = random.choice(d) 
+            try:
+                await channel.send(f"**{member.name}** {l}")
+            except discord.Forbidden:
+                print(f"❌ 錯誤：無法在 {member.guild.name} 的 #{channel.name} 傳送離開訊息。")
+
+    # ==================== 🙋 歡迎加入頻道控制 (Join) ====================
+
+    @app_commands.command(name="welcome_set", description="🛠️ 設定專屬的【新成員加入】歡迎通知頻道（管理員專用）")
+    @app_commands.describe(channel="請選擇要將歡迎訊息傳送到哪一個文字頻道")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def welcome_set(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        cfg = self.get_guild_settings(interaction.guild.id)
+        cfg["join"] = channel.id 
+        self.save_settings() 
+        
+        embed = discord.Embed(
+            title="✅ 歡迎加入通知設定成功",
+            description=f"已成功將【加入通知】切換至：{channel.mention}，原設定已被覆蓋並啟用。",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="welcome_cancel", description="❌ 完全取消/關閉【新成員加入】的歡迎通知")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def welcome_cancel(self, interaction: discord.Interaction):
+        cfg = self.get_guild_settings(interaction.guild.id)
+        cfg["join"] = False 
+        self.save_settings() 
+        
+        embed = discord.Embed(
+            title="🗑️ 歡迎加入通知已完全關閉",
+            description="已完全取消此伺服器的【新成員加入】訊息。機器人將不再發送任何歡迎加入通知。",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
+
+    # ==================== 🛠️ 審核機制控制指令 (Review) ====================
+
+    @app_commands.command(name="review_set", description="🛡️ 設定新成員帳號防護天數（低於此天數將自動禁言審核）")
+    @app_commands.describe(days="使用者填寫的數字（天）。帳號創建少於此天數將被攔截。輸入 0 代表關閉此功能。")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def review_set(self, interaction: discord.Interaction, days: int):
+        if days < 0:
+            await interaction.response.send_message("❌ 天數不能小於 0 喔！", ephemeral=True)
+            return
+            
+        cfg = self.get_guild_settings(interaction.guild.id)
+        cfg["min_age_days"] = days
+        self.save_settings() 
+        
+        if days == 0:
+            embed = discord.Embed(
+                title="🔓 審核隔離機制已關閉",
+                description="已完全關閉新帳號防護。任何新加入的成員都將直接放行。",
+                color=discord.Color.blue()
+            )
+        else:
+            embed = discord.Embed(
+                title="🛡️ 審核隔離機制設定成功",
+                description=f"目前防護天數已調整為：` {days} ` 天。\n任何創帳未滿該天數的新成員將會被**自動禁言**，並發送 Embed 訊息待由版主審核。",
+                color=discord.Color.green()
+            )
+            if days > 28:
+                embed.set_footer(text="💡 提示：因 Discord 官方限制，單次 Timeout 隔離上限最多為 28 天。")
+
+        await interaction.response.send_message(embed=embed)
+
+    # ==================== 🚶 成員離開頻道控制 (Remove) ====================
+
+    @app_commands.command(name="leave_set", description="🛠️ 設定專屬的【成員離開】通知頻道（管理員專用）")
+    @app_commands.describe(channel="請選擇要將離開訊息傳送到哪一個文字頻道")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def leave_set(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        cfg = self.get_guild_settings(interaction.guild.id)
+        cfg["remove"] = channel.id 
+        self.save_settings() 
+        
+        embed = discord.Embed(
+            title="✅ 成員離開通知設定成功",
+            description=f"已成功將【離開通知】切換至：{channel.mention}，原設定已被覆蓋並啟用。",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="leave_cancel", description="❌ 完全取消/關閉【成員離開】的通知")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def leave_cancel(self, interaction: discord.Interaction):
+        cfg = self.get_guild_settings(interaction.guild.id)
+        cfg["remove"] = False 
+        self.save_settings() 
+        
+        embed = discord.Embed(
+            title="🗑️ 成員離開通知已完全關閉",
+            description="已完全取消此伺服器的【成員離開】訊息。機器人將不再發送任何退出通知。",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
+
+    # 🛑 權限錯誤捕捉攔截器
+    @review_set.error
+    @welcome_set.error
+    @welcome_cancel.error
+    @leave_set.error
+    @leave_cancel.error
+    async def welcome_error_handler(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message("❌ 權限不足！只有擁有「管理伺服器」權限的管理員才能使用此功能。", ephemeral=True)
+
+# 👑 入口加載設定
+async def setup(bot):
+    await bot.add_cog(Welcome(bot))
