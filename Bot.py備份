@@ -1,0 +1,108 @@
+import os
+import asyncio
+import threading
+import logging
+import discord
+from discord.ext import commands, tasks  
+from flask import Flask
+from waitress import serve  # 修正：使用更穩定的 WSGI 伺服器防止 Flask 崩潰
+
+# 啟用日誌紀錄
+logging.basicConfig(level=logging.INFO)
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+# === A. 建立網頁外殼，防 Render 超時 ===
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!", 200
+
+def run_web_server():
+    port = int(os.getenv("PORT", 10000))
+    # 使用 waitress 替代 Flask 自帶的 app.run，更適合 Render 等生產環境
+    serve(app, host='0.0.0.0', port=port)
+
+# === B. Discord 機器人核心邏輯 ===
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# 🟢 每 60 秒定時重新整理一次「伺服器數量與人數」
+@tasks.loop(seconds=60.0)
+async def update_status():
+    await bot.wait_until_ready()
+    try:
+        guild_count = len(bot.guilds)
+        user_count = sum(guild.member_count for guild in bot.guilds if guild.member_count)
+        status_text = f"伺服器數 {guild_count} 個 • 用戶 {user_count} 個"
+
+        # 使用自訂狀態
+        activity = discord.Activity(type=discord.ActivityType.custom, name="custom", state=status_text)
+        await bot.change_presence(activity=activity)
+    except Exception as e:
+        logging.error(f"⚠️ 更新狀態時發生異常: {e}")
+
+# 自動掃描 cogs 資料夾
+async def load_extensions():
+    if not os.path.exists('./cogs'):
+        os.makedirs('./cogs')
+        print("📁 已自動建立 cogs 資料夾")
+    
+    for filename in os.listdir('./cogs'):
+        if filename.endswith('.py'):
+            try:
+                await bot.load_extension(f'cogs.{filename[:-3]}')
+                print(f"✅ 成功載入模組：{filename}")
+            except Exception as e:
+                print(f"❌ 載入模組 {filename} 失敗: {e}")
+
+# 🛡️ 最佳實踐：setup_hook 僅用來載入模組，不強制同步指令
+@bot.event
+async def setup_hook():
+    await load_extensions()
+
+@bot.event
+async def on_ready():
+    print(f"🤖 機器人指揮官已就位：{bot.user.name}")
+    
+    # 啟動定時狀態刷新任務
+    if not update_status.is_running():
+        update_status.start()
+        print("🔄 伺服器狀態監控任務已啟動（每 60 秒人數刷新）")
+
+# 🔒 【安全升級】：將斜線指令同步改為「手動觸發」
+# 只有機器人擁有者（Owner）可以執行 !sync 來同步斜線指令，免去開機 429 的風險
+@bot.command(name="sync")
+@commands.is_owner()
+async def sync_commands(ctx):
+    try:
+        print("🔄 收到手動指令，正在向 Discord 伺服器同步斜線指令...")
+        synced = await bot.tree.sync()
+        await ctx.send(f"🔗 [手動同步] 成功同步了 {len(synced)} 個斜線指令！")
+    except Exception as e:
+        await ctx.send(f"❌ 同步斜線指令失敗: {e}")
+
+# 主啟動鏈
+async def main():
+    async with bot:
+        await bot.start(DISCORD_TOKEN)
+
+# === C. 同時啟動網頁與機器人 ===
+if __name__ == "__main__":
+    if not DISCORD_TOKEN:
+        print("❌ 錯誤：找不到環境變數 DISCORD_TOKEN，請檢查環境設定！")
+        exit(1)
+
+    # 啟動 Web 伺服器
+    t = threading.Thread(target=run_web_server, daemon=True)
+    t.start()
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("👋 機器人已關閉")
