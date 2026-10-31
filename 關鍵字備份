@@ -1,0 +1,192 @@
+import os
+import json
+import discord
+from discord.ext import commands
+from discord import app_commands
+
+class KeywordReply(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.db_file = "replies.json"
+        self.replies_data = self.load_data()
+
+    # 讀取 JSON 檔案的工具
+    def load_data(self):
+        if os.path.exists(self.db_file):
+            try:
+                with open(self.db_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"讀取資料失敗: {e}")
+                return {}
+        return {}
+
+    # 寫入 JSON 檔案的工具
+    def save_data(self):
+        try:
+            with open(self.db_file, "w", encoding="utf-8") as f:
+                json.dump(self.replies_data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"儲存資料失敗: {e}")
+
+    # === 👑 高級輔助功能：刪除指令的「自動補齊關鍵字選單」 ===
+    async def keyword_autocomplete(self, interaction: discord.Interaction, current: str):
+        guild_id = str(interaction.guild_id)
+        guild_replies = self.replies_data.get(guild_id, {})
+        
+        # 找出符合使用者目前已輸入文字的關鍵字（如果不打字，就顯示全部）
+        choices = [
+            app_commands.Choice(name=kw, value=kw)
+            for kw in guild_replies.keys()
+            if current.lower() in kw.lower()
+        ]
+        
+        # Discord 的 Autocomplete 最多只能同時顯示 25 個選項
+        return choices[:25]
+
+    # 功能一：斜線指令 - 新增關鍵字自訂訊息
+    @app_commands.command(name="addcmd", description="新增自訂詞彙自動回覆功能")
+    @app_commands.describe(
+        keyword="觸發的詞彙", 
+        reply_text="機器人要自動回覆的自訂訊息",
+        trigger_type="選擇觸發條件",
+        reply_type="選擇機器人的回應方式"
+    )
+    @app_commands.choices(trigger_type=[
+        app_commands.Choice(name="包含即可", value="contains"),
+        app_commands.Choice(name="完全一致", value="exact")
+    ])
+    @app_commands.choices(reply_type=[
+        app_commands.Choice(name="回覆", value="reply"),
+        app_commands.Choice(name="僅發送訊息", value="send")
+    ])
+    async def add_command(
+        self, 
+        interaction: discord.Interaction, 
+        keyword: str, 
+        reply_text: str, 
+        trigger_type: app_commands.Choice[str], 
+        reply_type: app_commands.Choice[str]
+    ):
+        await interaction.response.defer(ephemeral=True)
+        
+        guild_id = str(interaction.guild_id)
+        clean_keyword = keyword.strip().lower()
+
+        if guild_id not in self.replies_data:
+            self.replies_data[guild_id] = {}
+
+        self.replies_data[guild_id][clean_keyword] = {
+            "reply_text": reply_text,
+            "trigger_type": trigger_type.value,
+            "reply_type": reply_type.value
+        }
+        self.save_data()
+
+        await interaction.followup.send(
+            f"**成功設定！**\n"
+            f"關鍵字：`{keyword}`\n"
+            f"觸發方式：`{trigger_type.name}`\n"
+            f"回覆方式：`{reply_type.name}`\n"
+            f"> 回覆內容：{reply_text}"
+        )
+
+    # 功能二：斜線指令 - 刪除關鍵字（👑 升級：掛載自動補齊選單）
+    @app_commands.command(name="delcmd", description="刪除已設定的自訂詞彙（可從選單直接點選）")
+    @app_commands.describe(keyword="想刪除的觸發詞彙（會自動跳出選單供點選）")
+    @app_commands.autocomplete(keyword=keyword_autocomplete)  # 連結自動補齊邏輯
+    async def del_command(self, interaction: discord.Interaction, keyword: str):
+        await interaction.response.defer(ephemeral=True)
+
+        guild_id = str(interaction.guild_id)
+        clean_keyword = keyword.strip().lower()
+
+        if guild_id in self.replies_data and clean_keyword in self.replies_data[guild_id]:
+            del self.replies_data[guild_id][clean_keyword]
+            self.save_data()
+            await interaction.followup.send(f"🗑️ 已成功刪除關鍵字：`{keyword}`")
+        else:
+            await interaction.followup.send(f"❌ 找不到關鍵字 `{keyword}`，請確認是否已從選單正確點選。")
+
+    # 功能三：斜線指令 - 查看所有已加入的關鍵字清單
+    @app_commands.command(name="listcmd", description="查看本伺服器目前所有已設定的自訂關鍵字清單")
+    async def list_command(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        guild_id = str(interaction.guild_id)
+        guild_replies = self.replies_data.get(guild_id, {})
+
+        if not guild_replies:
+            await interaction.followup.send("本伺服器目前還沒有設定任何自訂關鍵字喔！")
+            return
+
+        embed = discord.Embed(
+            title=f"📋 【{interaction.guild.name}】自訂關鍵字回覆清單",
+            description="當滿足觸發條件時，機器人就會自動回答設定的內容",
+            color=discord.Color.green()
+        )
+        
+        for index, (kw, data) in enumerate(guild_replies.items(), start=1):
+            if index > 25:
+                embed.set_footer(text=f"目前總計：{len(guild_replies)} 個")
+                break
+                
+            if isinstance(data, dict):
+                rt = data.get("reply_text", "")
+                t_type = "包含即可" if data.get("trigger_type") == "contains" else "完全一致"
+                r_type = "回覆" if data.get("reply_type") == "reply" else "純發送"
+            else:
+                rt = data
+                t_type = "包含即可 (舊)"
+                r_type = "純發送 (舊)"
+
+            if len(rt) > 30:
+                rt = f"{rt[:30]}..."
+                
+            embed.add_field(
+                name=f"{index}. 🔍 觸發詞：{kw} 【{t_type} | {r_type}】",
+                value=f"💬 回覆：{rt}",
+                inline=False
+            )
+        else:
+            embed.set_footer(text=f"目前總計：{len(guild_replies)} 個自動回覆指令")
+
+        await interaction.followup.send(embed=embed)
+
+    # 功能四：監聽所有聊天訊息
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.content:
+            return
+
+        guild_id = str(message.guild.id) if message.guild else "dm"
+        message_content = message.content.lower().strip()
+
+        guild_replies = self.replies_data.get(guild_id, {})
+        
+        for kw, data in guild_replies.items():
+            if isinstance(data, dict):
+                reply_text = data.get("reply_text", "")
+                trigger_type = data.get("trigger_type", "contains")
+                reply_type = data.get("reply_type", "send")
+            else:
+                reply_text = data
+                trigger_type = "contains"
+                reply_type = "send"
+
+            is_triggered = False
+            if trigger_type == "exact" and message_content == kw:
+                is_triggered = True
+            elif trigger_type == "contains" and kw in message_content:
+                is_triggered = True
+
+            if is_triggered:
+                if reply_type == "reply":
+                    await message.reply(reply_text)
+                else:
+                    await message.channel.send(reply_text)
+                break
+
+# 讓 main.py 自動載入
+async def setup(bot):
+    await bot.add_cog(KeywordReply(bot))
