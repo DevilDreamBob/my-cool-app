@@ -1,0 +1,138 @@
+import os
+import json
+import discord
+from discord import app_commands
+from discord.ext import commands
+from typing import Optional
+
+DATA_FILE = "autorole.json"
+
+def load_settings():
+    """載入身分組設定"""
+    if not os.path.exists(DATA_FILE):
+        return {}
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_settings(data):
+    """儲存身分組設定"""
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+class AutoRoleCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    # 建立 /autorole 主指令群組
+    autorole_group = app_commands.Group(name="autorole", description="管理新成員加入時自動給予的多重身分組")
+
+    # ==================== 子指令 A：新增/設定自動身分組 ====================
+    @autorole_group.command(name="set", description="新增一個新成員加入時自動給予的身分組（可重複執行以設定多個）")
+    @app_commands.describe(role="請選擇要新增的自動身分組")
+    @app_commands.checks.has_permissions(manage_roles=True)
+    async def set_autorole(self, interaction: discord.Interaction, role: discord.Role):
+        # 檢查機器人權限順位
+        if role.position >= interaction.guild.me.top_role.position:
+            await interaction.response.send_message("❌ 失敗：該身分組的順位高於機器人，我沒有權限賦予它喔！請在伺服器設定中將機器人身分組往上移。", ephemeral=True)
+            return
+
+        settings = load_settings()
+        guild_id = str(interaction.guild_id)
+
+        # 如果這個伺服器還沒有任何紀錄，建立一個新的列表
+        if guild_id not in settings or not isinstance(settings[guild_id], list):
+            settings[guild_id] = []
+
+        # 檢查是否已經重複加過了
+        if role.id in settings[guild_id]:
+            await interaction.response.send_message(f"⚠️ {role.mention} 已經在自動身分組的名單中了，不用重複設定喔！", ephemeral=True)
+            return
+
+        # 將新的身分組 ID 加進列表
+        settings[guild_id].append(role.id)
+        save_settings(settings)
+
+        embed = discord.Embed(title="✅ 自動身分組新增成功", color=discord.Color.green())
+        embed.description = f"已將 {role.mention} 加入自動給予清單。\n目前該伺服器共有 **{len(settings[guild_id])}** 個自動身分組。"
+        await interaction.response.send_message(embed=embed)
+
+    # ==================== 子指令 B：移除特定或全部自動身分組 ====================
+    @autorole_group.command(name="remove", description="移除指定的自動身分組（若留空不選則代表一次清空全部）")
+    @app_commands.describe(role="請選擇要移除的身分組（留空則代表關閉此功能並全清空）")
+    @app_commands.checks.has_permissions(manage_roles=True)
+    async def remove_autorole(self, interaction: discord.Interaction, role: Optional[discord.Role] = None):
+        settings = load_settings()
+        guild_id = str(interaction.guild_id)
+
+        # 如果本來就沒有設定過任何東西
+        if guild_id not in settings or not settings[guild_id]:
+            await interaction.response.send_message("⚠️ 本伺服器目前本來就沒有設定任何自動身分組喔！", ephemeral=True)
+            return
+
+        # 情況一：使用者有選擇「特定的身分組」要移除
+        if role is not None:
+            if role.id in settings[guild_id]:
+                settings[guild_id].remove(role.id)
+                
+                # 如果刪完之後列表空了，就把該伺服器的 Key 直接刪掉維持 JSON 整潔
+                if not settings[guild_id]:
+                    del settings[guild_id]
+                    msg = f"🗑️ 已將 {role.mention} 從清單中移除。目前已無任何自動身分組設定。"
+                else:
+                    msg = f"🗑️ 已將 {role.mention} 從清單中移除。剩餘 **{len(settings[guild_id])}** 個自動身分組。"
+                
+                save_settings(settings)
+                
+                embed = discord.Embed(title="⚙️ 自動身分組已部分移除", color=discord.Color.orange())
+                embed.description = msg
+                await interaction.response.send_message(embed=embed)
+            else:
+                await interaction.response.send_message(f"❌ 錯誤：{role.mention} 本來就沒有在自動身分組清單中喔！", ephemeral=True)
+
+        # 情況二：使用者「留空不填」 ➡️ 直接全部清空
+        else:
+            del settings[guild_id]
+            save_settings(settings)
+            
+            embed = discord.Embed(title="🗑️ 自動身分組已完全取消", color=discord.Color.red())
+            embed.description = "已清空本伺服器所有的自動身分組設定，新成員加入時將不會獲得任何身分組。"
+            await interaction.response.send_message(embed=embed)
+
+    # 權限不足錯誤處理
+    @set_autorole.error
+    @remove_autorole.error
+    async def autorole_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message("❌ 您沒有「管理身分組」的權限，無法使用此指令！", ephemeral=True)
+
+    # ==================== 監聽事件：新成員加入（迴圈給予所有身分組） ====================
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        settings = load_settings()
+        guild_id = str(member.guild.id)
+
+        if guild_id in settings and isinstance(settings[guild_id], list):
+            role_ids = settings[guild_id]
+            roles_to_add = []
+
+            # 檢查並把所有存在的有效身分組抓出來
+            for role_id in role_ids:
+                role = member.guild.get_role(role_id)
+                if role:
+                    roles_to_add.append(role)
+
+            if roles_to_add:
+                try:
+                    # 使用 member.add_roles 傳入陣列，一次性把所有身分組發放完畢，效率極高
+                    await member.add_roles(*roles_to_add)
+                    print(f"✅ 已成功為伺服器 [{member.guild.name}] 的 {member.name} 一次性給予了 {len(roles_to_add)} 個自動身分組！")
+                except discord.Forbidden:
+                    print(f"❌ 無法在伺服器 [{member.guild.name}] 給予身分組：機器人權限不足。")
+                except Exception as e:
+                    print(f"❌ 自動給予身分組時發生未知錯誤: {e}")
+
+async def setup(bot):
+    await bot.add_cog(AutoRoleCog(bot))
