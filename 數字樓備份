@@ -1,0 +1,152 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
+
+class NumberCounting(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        
+        # 儲存各頻道的遊戲狀態
+        # 結構: { channel_id: { "current_number": int, "last_user_id": int, "wrong_mode": str, "allow_chat": bool } }
+        self.games = {}
+
+    @app_commands.command(name="創建數字樓", description="啟動數字接龍蓋樓")
+    @app_commands.describe(
+        mode="要建立新頻道，還是直接在目前頻道啟用？",
+        wrong_action="數錯時的處置方式：重置（歸零）或僅文字提醒（不歸零）",
+        allow_text="是否允許在頻道內發送『數字以外』的聊天訊息？",
+        channel_name="若選擇建立新頻道，請輸入頻道名稱（選填）"
+    )
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="建立新頻道", value="new"),
+        app_commands.Choice(name="在目前頻道直接啟用", value="current")
+    ], wrong_action=[
+        app_commands.Choice(name="重置", value="reset"),
+        app_commands.Choice(name="僅提醒", value="ignore")
+    ], allow_text=[
+        app_commands.Choice(name="允許聊天", value="yes"),
+        app_commands.Choice(name="嚴格禁言", value="no")
+    ])
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def setup_counting(
+        self, 
+        interaction: discord.Interaction, 
+        mode: str, 
+        wrong_action: str, 
+        allow_text: str,
+        channel_name: str = "數字接龍樓"
+    ):
+        await interaction.response.defer(ephemeral=True)
+        guild = interaction.guild
+        
+        # 1. 判斷頻道創建模式
+        if mode == "new":
+            target_channel = await guild.create_text_channel(name=channel_name)
+            msg_prefix = f"✅ 已成功建立新頻道 {target_channel.mention}，"
+        else:
+            target_channel = interaction.channel
+            msg_prefix = "✅ 已在目前頻道成功啟用，"
+
+        # 2. 初始化該頻道的遊戲數據
+        allow_chat_bool = True if allow_text == "yes" else False
+        self.games[target_channel.id] = {
+            "current_number": 0,
+            "last_user_id": None,
+            "wrong_mode": wrong_action,
+            "allow_chat": allow_chat_bool
+        }
+
+        # 3. 發送精美公告 Embed
+        mode_text = "【數錯歸零重來】" if wrong_action == "reset" else "【僅文字提醒不歸零】"
+        chat_text = "【允許在中間聊天】" if allow_chat_bool else "【禁止發非數字訊息】"
+        
+        start_embed = discord.Embed(
+            title="🔢 數字接龍蓋樓大賽 —— 正式開蓋！",
+            description=f"請從 **1** 開始按順序往下數！\n\n"
+                        f"📌 **本樓規則：**\n"
+                        f"1. 每人**不能連續數兩次**，必須跟其他人輪流。\n"
+                        f"2. 處罰機制：{mode_text}\n"
+                        f"3. 聊天規則：{chat_text}",
+            color=discord.Color.from_rgb(255, 182, 193)  # 可愛的粉紅色
+        )
+        
+        await target_channel.send(embed=start_embed)
+        await interaction.followup.send(f"{msg_prefix}遊戲已正式開始！", ephemeral=True)
+
+    # 監聽訊息事件（處理接龍邏輯）
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        # 排除機器人自己的訊息，且該頻道必須正在舉辦遊戲
+        if message.author.bot or message.channel.id not in self.games:
+            return
+
+        game = self.games[message.channel.id]
+        content = message.content.strip()
+
+        # 嘗試將訊息轉換成整數數字
+        try:
+            input_number = int(content)
+        except ValueError:
+            # 觸發「非數字」訊息時的邏輯
+            if not game["allow_chat"]:
+                # 如果設定為【禁止聊天】，直接秒刪訊息並警告
+                try:
+                    await message.delete()
+                    await message.channel.send(f"❌ {message.author.mention} 這裡嚴格禁止發送數字以外的訊息！", delete_after=3)
+                except discord.Forbidden:
+                    pass
+            # 如果設定為【允許聊天】，則機器人會溫和地當作沒看到，不破壞遊戲進度
+            return
+
+        # 計算理想的正確數字
+        expected_number = game["current_number"] + 1
+
+        # 【規則 1】：檢查是不是同一個人連續數數
+        if game["last_user_id"] == message.author.id:
+            try:
+                await message.delete()
+            except discord.Forbidden:
+                pass
+            
+            if game["wrong_mode"] == "reset":
+                game["current_number"] = 0
+                game["last_user_id"] = None
+                await message.channel.send(f"💥 {message.author.mention} 不能連續數兩次！樓塌了！進度歸零，請從 **1** 重新開始。")
+            else:
+                await message.channel.send(f"⚠️ {message.author.mention} 不能連續數兩次！。", delete_after=5)
+            return
+
+        # 【規則 2】：檢查數字是否正確
+        if input_number == expected_number:
+            # 數字正確，更新進度
+            game["current_number"] = input_number
+            game["last_user_id"] = message.author.id
+            
+            # 每到 100 樓給一個特別慶祝表情
+            if input_number % 100 == 0:
+                await message.add_reaction("🎉")
+            else:
+                await message.add_reaction("✅")
+        else:
+            # 數字錯誤，依照設定處罰
+            try:
+                await message.delete()
+            except discord.Forbidden:
+                pass
+
+            if game["wrong_mode"] == "reset":
+                game["current_number"] = 0
+                game["last_user_id"] = None
+                await message.channel.send(f"💥 {message.author.mention} 數錯了！（應該是 {expected_number} 卻輸入了 {input_number}），請從 **1** 重新開始。")
+            else:
+                await message.channel.send(f"⚠️ {message.author.mention} 數字不對（應該是 {expected_number}）", delete_after=5)
+
+    # 權限錯誤自動捕捉
+    @setup_counting.error
+    async def permission_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message("❌ 你的權限不足（需要管理頻道權限），無法使用此指令！", ephemeral=True)
+
+# 載入 Cog
+async def setup(bot: commands.Bot):
+    await bot.add_cog(NumberCounting(bot))
