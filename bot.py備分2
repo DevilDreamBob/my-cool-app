@@ -1,0 +1,126 @@
+import os
+import asyncio
+import threading
+import logging
+import discord
+from discord.ext import commands, tasks  
+from flask import Flask
+from waitress import serve  # 修正：使用更穩定的 WSGI 伺服器防止 Flask 崩潰
+import psycopg2             # ➕ 新增：資料庫支援
+from psycopg2 import pool   # ➕ 新增：資料庫連線池支援
+
+# 啟用日誌紀錄
+logging.basicConfig(level=logging.INFO)
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+# === A. 建立網頁外殼，防 Render 超時 ===
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!", 200
+
+def run_web_server():
+    port = int(os.getenv("PORT", 10000))
+    serve(app, host='0.0.0.0', port=port)
+
+# === B. Discord 機器人核心邏輯（自訂 Bot 類別） ===
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+# ➕ 修正：繼承 commands.Bot，在初始化時直接讀取環境變數建立連線池
+class MyBot(commands.Bot):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # 💡 核心修正：直接使用 os.getenv("DATABASE_URL")，確保 100% 抓到 Render 後台的網址
+        self.db_pool = pool.SimpleConnectionPool(
+            1, 20,
+            dsn=os.getenv("DATABASE_URL")
+        )
+        print("🗄️ Supabase 資料庫連線池初始化成功")
+
+    async def setup_hook(self):
+        await load_extensions(self)  # 將 bot 傳入
+
+    async def close(self):
+        # 🤖 機器人關閉時，順手把資料庫連線全部安全釋放
+        if self.db_pool:
+            self.db_pool.closeall()
+            print("🗄️ Supabase 資料庫連線池已安全關閉")
+        await super().close()
+
+# 實例化你專屬的 Bot
+bot = MyBot(command_prefix="!", intents=intents)
+
+# 🟢 每 60 秒定時重新整理一次「伺服器數量與人數」
+@tasks.loop(seconds=60.0)
+async def update_status():
+    await bot.wait_until_ready()
+    try:
+        guild_count = len(bot.guilds)
+        user_count = sum(guild.member_count for guild in bot.guilds if guild.member_count)
+        status_text = f"伺服器數 {guild_count} 個 • 用戶 {user_count} 個"
+
+        activity = discord.Activity(type=discord.ActivityType.custom, name="custom", state=status_text)
+        await bot.change_presence(activity=activity)
+    except Exception as e:
+        logging.error(f"⚠️ 更新狀態時發生異常: {e}")
+
+# 自動掃描 cogs 資料夾
+async def load_extensions(bot_instance):
+    if not os.path.exists('./cogs'):
+        os.makedirs('./cogs')
+        print("📁 已自動建立 cogs 資料夾")
+    
+    for filename in os.listdir('./cogs'):
+        if filename.endswith('.py'):
+            try:
+                await bot_instance.load_extension(f'cogs.{filename[:-3]}')
+                print(f"✅ 成功載入模組：{filename}")
+            except Exception as e:
+                print(f"❌ 載入模組 {filename} 失敗: {e}")
+
+@bot.event
+async def on_ready():
+    print(f"🤖 機器人指揮官已就位：{bot.user.name}")
+    
+    if not update_status.is_running():
+        update_status.start()
+        print("🔄 伺服器狀態監控任務已啟動（每 60 秒人數刷新）")
+
+# 🔒 【安全升級】：將斜線指令同步改為「手動觸發」
+@bot.command(name="sync")
+@commands.is_owner()
+async def sync_commands(ctx):
+    try:
+        print("🔄 收到手動指令，正在向 Discord 伺服器同步斜線指令...")
+        synced = await bot.tree.sync()
+        await ctx.send(f"🔗 [手動同步] 成功同步了 {len(synced)} 個斜線指令！")
+    except Exception as e:
+        await ctx.send(f"❌ 同步斜線指令失敗: {e}")
+
+# 主啟動鏈
+async def main():
+    async with bot:
+        await bot.start(DISCORD_TOKEN)
+
+# === C. 同時啟動網頁與機器人 ===
+if __name__ == "__main__":
+    if not DISCORD_TOKEN:
+        print("❌ 錯誤：找不到環境變數 DISCORD_TOKEN，請檢查環境設定！")
+        exit(1)
+    if not os.getenv("DATABASE_URL"):
+        print("❌ 錯誤：找不到環境變數 DATABASE_URL，請先前往 Render 後台設定！")
+        exit(1)
+
+    # 啟動 Web 伺服器
+    t = threading.Thread(target=run_web_server, daemon=True)
+    t.start()
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("👋 機器人已關閉")
