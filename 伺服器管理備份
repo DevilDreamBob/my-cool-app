@@ -1,0 +1,352 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
+
+class ServerManagement(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        
+        # 歡迎私訊設定暫存 (格式: {guild_id: "歡迎訊息內容"})
+        self.welcome_messages = {}
+
+    # === 【功能一：創建/刪除身分組（管理員專用）】 ===
+    @app_commands.command(name="身分組創建", description="⚠️ 建立一個全新的身分組（管理員專用）")
+    @app_commands.describe(
+        name="身分組名稱", 
+        preset_color="🎨 請選擇內建的精美好用顏色（不選則預設為灰白色）",
+        custom_color_hex="✍️ 想要特殊顏色再自己輸入色碼（選填，例如: #FF5733）"
+    )
+    # 🌈 幫你設計好現成的點選選單，不用再記色碼了！
+    @app_commands.choices(preset_color=[
+        app_commands.Choice(name="🔵 經典藍", value="blue"),
+        app_commands.Choice(name="🟢  Tiffany綠", value="teal"),
+        app_commands.Choice(name="🟢 耀眼綠", value="green"),
+        app_commands.Choice(name="🔴 惡魔紅", value="red"),
+        app_commands.Choice(name="💗 可愛粉", value="fuchsia"),
+        app_commands.Choice(name="🟣 浪漫紫", value="purple"),
+        app_commands.Choice(name="🟡 香蕉黃", value="gold"),
+        app_commands.Choice(name="🟠 活力橘", value="orange")
+    ])
+    @app_commands.checks.has_permissions(administrator=True)
+    async def create_role(
+        self, 
+        interaction: discord.Interaction, 
+        name: str, 
+        preset_color: str = None, 
+        custom_color_hex: str = None
+    ):
+        # 預設為 Discord 基礎灰色
+        color = discord.Color.default()
+
+        # 1. 優先判斷使用者有沒有自己打自訂色碼
+        if custom_color_hex:
+            try:
+                color = discord.Color.from_str(custom_color_hex)
+            except ValueError:
+                await interaction.response.send_message("❌ 自訂色碼格式錯誤！請使用如 `#FF5733` 的格式，或直接點選內建顏色選單。", ephemeral=True)
+                return
+        # 2. 如果沒有自訂色碼，但有選內建的顏色
+        elif preset_color:
+            color_mapping = {
+                "blue": discord.Color.blue(),
+                "teal": discord.Color.teal(),
+                "green": discord.Color.green(),
+                "red": discord.Color.red(),
+                "fuchsia": discord.Color.fuchsia(),
+                "purple": discord.Color.purple(),
+                "gold": discord.Color.gold(),
+                "orange": discord.Color.orange()
+            }
+            color = color_mapping.get(preset_color, discord.Color.default())
+
+        # 建立身分組
+        role = await interaction.guild.create_role(name=name, color=color)
+        await interaction.response.send_message(f"✅ 成功建立身分組：{role.mention}", ephemeral=True)
+
+    @app_commands.command(name="身分組刪除", description="⚠️ 刪除指定的身分組（管理員專用）")
+    @app_commands.describe(role="要刪除的身分組")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def delete_role(self, interaction: discord.Interaction, role: discord.Role):
+        try:
+            await role.delete()
+            await interaction.response.send_message(f"🗑️ 成功刪除身分組：**{role.name}**", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ 機器人權限不足，無法刪除該身分組（請確認機器人身分組順位在該身分組之上）。", ephemeral=True)
+
+
+    # === 【功能二：反應領取/取消身分組（管理員專用）】 ===
+    @app_commands.command(name="反應領取身分組", description="⚠️ 建立一個點擊表情符號領取/取消身分組的訊息（管理員專用）")
+    @app_commands.describe(role="要分發的身分組", emoji="對應的表情符號 (例如: 👍)", text="訊息描述內容")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def reaction_role(self, interaction: discord.Interaction, role: discord.Role, emoji: str, text: str):
+        try:
+            embed = discord.Embed(
+                title="✨ 身分組自助領取處",
+                description=f"{text}\n\n點擊下方反應 {emoji} 即可領取/取消 **{role.mention}** 身分組！",
+                color=discord.Color.blue()
+            )
+            await interaction.response.send_message(embed=embed)
+            message = await interaction.original_response()
+            await message.add_reaction(emoji)
+        except Exception:
+            await interaction.response.send_message("❌ 建立失敗，請檢查表情符號是否正確。", ephemeral=True)
+
+    # 監聽點擊反應 (領取身分組)
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.bot.user.id:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+
+        channel = guild.get_channel(payload.channel_id)
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except Exception:
+            return
+
+        if message.author == self.bot.user and message.embeds:
+            embed = message.embeds[0]
+            if embed.title == "✨ 身分組自助領取處":
+                for role in guild.roles:
+                    if role.mention in embed.description and str(payload.emoji) in embed.description:
+                        member = guild.get_member(payload.user_id)
+                        if member:
+                            await member.add_roles(role)
+
+    # 監聽取消反應 (收回身分組)
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+
+        channel = guild.get_channel(payload.channel_id)
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except Exception:
+            return
+
+        if message.author == self.bot.user and message.embeds:
+            embed = message.embeds[0]
+            if embed.title == "✨ 身分組自助領取處":
+                for role in guild.roles:
+                    if role.mention in embed.description and str(payload.emoji) in embed.description:
+                        member = guild.get_member(payload.user_id)
+                        if member:
+                            await member.remove_roles(role)
+
+
+    # === 【功能三：設定歡迎私訊（版主/管理層專用）】 ===
+    @app_commands.command(name="設定歡迎私訊", description="🛠️ 設定新成員加入時的自動私訊內容（版主/管理層專用）")
+    @app_commands.describe(text="歡迎訊息內容 (輸入 clear 可清除設定，支援 {user} 與 {server} 變數)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_welcome(self, interaction: discord.Interaction, text: str):
+        if text.lower() == "clear":
+            self.welcome_messages.pop(interaction.guild_id, None)
+            await interaction.response.send_message("🗑️ 已成功清除歡迎私訊設定。", ephemeral=True)
+        else:
+            self.welcome_messages[interaction.guild_id] = text
+            await interaction.response.send_message(f"📝 歡迎私訊設定成功！新成員將會收到：\n```\n{text}\n```", ephemeral=True)
+
+    # 監聽新成員加入事件 (觸發私訊)
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        guild_id = member.guild.id
+        if guild_id in self.welcome_messages:
+            welcome_text = self.welcome_messages[guild_id]
+            custom_text = welcome_text.replace("{user}", member.mention).replace("{server}", member.guild.name)
+            try:
+                await member.send(custom_text)
+            except discord.Forbidden:
+                print(f"⚠️ 無法私訊新成員 {member.name}，對方可能關閉了陌生人私訊。")
+
+
+    # === 🛡️ 權限錯誤監聽器 ===
+    @commands.Cog.listener()
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ 你的權限不足，無法使用此指令！", ephemeral=True)
+
+# 載入 Cog
+async def setup(bot: commands.Bot):
+    await bot.add_cog(ServerManagement(bot))
+import discord
+from discord.ext import commands
+from discord import app_commands
+
+class ServerManagement(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        
+        # 歡迎私訊設定暫存 (格式: {guild_id: "歡迎訊息內容"})
+        self.welcome_messages = {}
+
+    # === 【功能一：創建/刪除身分組（管理員專用）】 ===
+    @app_commands.command(name="身分組創建", description="⚠️ 建立一個全新的身分組（管理員專用）")
+    @app_commands.describe(
+        name="身分組名稱", 
+        preset_color="🎨 請選擇內建的精美好用顏色（不選則預設為灰白色）",
+        custom_color_hex="✍️ 想要特殊顏色再自己輸入色碼（選填，例如: #FF5733）"
+    )
+    # 🌈 幫你設計好現成的點選選單，不用再記色碼了！
+    @app_commands.choices(preset_color=[
+        app_commands.Choice(name="🔵 經典藍", value="blue"),
+        app_commands.Choice(name="🟢  Tiffany綠", value="teal"),
+        app_commands.Choice(name="🟢 耀眼綠", value="green"),
+        app_commands.Choice(name="🔴 惡魔紅", value="red"),
+        app_commands.Choice(name="💗 可愛粉", value="fuchsia"),
+        app_commands.Choice(name="🟣 浪漫紫", value="purple"),
+        app_commands.Choice(name="🟡 香蕉黃", value="gold"),
+        app_commands.Choice(name="🟠 活力橘", value="orange")
+    ])
+    @app_commands.checks.has_permissions(administrator=True)
+    async def create_role(
+        self, 
+        interaction: discord.Interaction, 
+        name: str, 
+        preset_color: str = None, 
+        custom_color_hex: str = None
+    ):
+        # 預設為 Discord 基礎灰色
+        color = discord.Color.default()
+
+        # 1. 優先判斷使用者有沒有自己打自訂色碼
+        if custom_color_hex:
+            try:
+                color = discord.Color.from_str(custom_color_hex)
+            except ValueError:
+                await interaction.response.send_message("❌ 自訂色碼格式錯誤！請使用如 `#FF5733` 的格式，或直接點選內建顏色選單。", ephemeral=True)
+                return
+        # 2. 如果沒有自訂色碼，但有選內建的顏色
+        elif preset_color:
+            color_mapping = {
+                "blue": discord.Color.blue(),
+                "teal": discord.Color.teal(),
+                "green": discord.Color.green(),
+                "red": discord.Color.red(),
+                "fuchsia": discord.Color.fuchsia(),
+                "purple": discord.Color.purple(),
+                "gold": discord.Color.gold(),
+                "orange": discord.Color.orange()
+            }
+            color = color_mapping.get(preset_color, discord.Color.default())
+
+        # 建立身分組
+        role = await interaction.guild.create_role(name=name, color=color)
+        await interaction.response.send_message(f"✅ 成功建立身分組：{role.mention}", ephemeral=True)
+
+    @app_commands.command(name="身分組刪除", description="⚠️ 刪除指定的身分組（管理員專用）")
+    @app_commands.describe(role="要刪除的身分組")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def delete_role(self, interaction: discord.Interaction, role: discord.Role):
+        try:
+            await role.delete()
+            await interaction.response.send_message(f"🗑️ 成功刪除身分組：**{role.name}**", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ 機器人權限不足，無法刪除該身分組（請確認機器人身分組順位在該身分組之上）。", ephemeral=True)
+
+
+    # === 【功能二：反應領取/取消身分組（管理員專用）】 ===
+    @app_commands.command(name="反應領取身分組", description="⚠️ 建立一個點擊表情符號領取/取消身分組的訊息（管理員專用）")
+    @app_commands.describe(role="要分發的身分組", emoji="對應的表情符號 (例如: 👍)", text="訊息描述內容")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def reaction_role(self, interaction: discord.Interaction, role: discord.Role, emoji: str, text: str):
+        try:
+            embed = discord.Embed(
+                title="✨ 身分組自助領取處",
+                description=f"{text}\n\n點擊下方反應 {emoji} 即可領取/取消 **{role.mention}** 身分組！",
+                color=discord.Color.blue()
+            )
+            await interaction.response.send_message(embed=embed)
+            message = await interaction.original_response()
+            await message.add_reaction(emoji)
+        except Exception:
+            await interaction.response.send_message("❌ 建立失敗，請檢查表情符號是否正確。", ephemeral=True)
+
+    # 監聽點擊反應 (領取身分組)
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.bot.user.id:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+
+        channel = guild.get_channel(payload.channel_id)
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except Exception:
+            return
+
+        if message.author == self.bot.user and message.embeds:
+            embed = message.embeds[0]
+            if embed.title == "✨ 身分組自助領取處":
+                for role in guild.roles:
+                    if role.mention in embed.description and str(payload.emoji) in embed.description:
+                        member = guild.get_member(payload.user_id)
+                        if member:
+                            await member.add_roles(role)
+
+    # 監聽取消反應 (收回身分組)
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        guild = self.bot.get_guild(payload.guild_id)
+        if not guild:
+            return
+
+        channel = guild.get_channel(payload.channel_id)
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except Exception:
+            return
+
+        if message.author == self.bot.user and message.embeds:
+            embed = message.embeds[0]
+            if embed.title == "✨ 身分組自助領取處":
+                for role in guild.roles:
+                    if role.mention in embed.description and str(payload.emoji) in embed.description:
+                        member = guild.get_member(payload.user_id)
+                        if member:
+                            await member.remove_roles(role)
+
+
+    # === 【功能三：設定歡迎私訊（版主/管理層專用）】 ===
+    @app_commands.command(name="設定歡迎私訊", description="🛠️ 設定新成員加入時的自動私訊內容（版主/管理層專用）")
+    @app_commands.describe(text="歡迎訊息內容 (輸入 clear 可清除設定，支援 {user} 與 {server} 變數)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_welcome(self, interaction: discord.Interaction, text: str):
+        if text.lower() == "clear":
+            self.welcome_messages.pop(interaction.guild_id, None)
+            await interaction.response.send_message("🗑️ 已成功清除歡迎私訊設定。", ephemeral=True)
+        else:
+            self.welcome_messages[interaction.guild_id] = text
+            await interaction.response.send_message(f"📝 歡迎私訊設定成功！新成員將會收到：\n```\n{text}\n```", ephemeral=True)
+
+    # 監聽新成員加入事件 (觸發私訊)
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        guild_id = member.guild.id
+        if guild_id in self.welcome_messages:
+            welcome_text = self.welcome_messages[guild_id]
+            custom_text = welcome_text.replace("{user}", member.mention).replace("{server}", member.guild.name)
+            try:
+                await member.send(custom_text)
+            except discord.Forbidden:
+                print(f"⚠️ 無法私訊新成員 {member.name}，對方可能關閉了陌生人私訊。")
+
+
+    # === 🛡️ 權限錯誤監聽器 ===
+    @commands.Cog.listener()
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ 你的權限不足，無法使用此指令！", ephemeral=True)
+
+# 載入 Cog
+async def setup(bot: commands.Bot):
+    await bot.add_cog(ServerManagement(bot))
