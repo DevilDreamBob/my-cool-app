@@ -1,0 +1,80 @@
+import random
+import discord
+from discord.ext import commands
+from discord import app_commands
+
+class RandomReactions(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        
+        # 儲存每位成員的個人設定
+        self.user_configs = {}
+
+        # 🎨 表情符號池（包含你的自訂動態表情）
+        self.emoji_pool = [
+            "<:1518491404756848781:1533410534169378836>", "<:1517044307423662182:1533410532286005438>", "<:1517040558105694318:1533410530096578630>", "<:1517035736539336755:1533410528104419428>", "<:1495417413309694093:1533410526518968481>", "<:1493953287010123807:1533410524870479992>", "<:1491416128893747281:1533410521980735568>", "<:1489881507857305620:1533410519757885591>",
+            "<:867695735868751882:1533410517937557545>", "<:857903037829611521:1533410515898994749>", "<:856829693143810069:1533410514074337350>", "<:854192452755914793:1533410512308535437>", "<:854192187780366336:1533410509464797436>", "<:851830771454836774:1533410507824828527>", "<a:Crawler_mimic_1:1533062947172122774>", "<a:14718043190190449501:1533062897247457441>",
+            "<a:giphy:1533062843262570507>", "<a:1020931599296118794:1533062734034239628>", "<a:1139376610655600660:1533062683493138493>", "<:1211202969228541962:1533411655575142521>", "<:1112321016308437114:1533411653897687050>", "<:1437084964603822222:1533411625501982750>", "<:1437084878314274947:1533411623971192862>", "<:1217778226915704893:1533411622171971634>"
+        ]
+
+    @app_commands.command(name="隨機反應設定", description="✨ 設定當你發言時，讓機器人自動為你的訊息加上隨機表情符號（每個人獨立）")
+    @app_commands.describe(
+        status="請選擇要開啟或關閉你個人的隨機反應功能",
+        chance="觸發機率百分比（輸入 1 到 100 的整數，例如 50 代表你發言時有 50% 機率被貼表情）"
+    )
+    @app_commands.choices(status=[
+        app_commands.Choice(name="🟢 開啟我的隨機反應", value="on"),
+        app_commands.Choice(name="🔴 關閉我的隨機反應", value="off")
+    ])
+    async def set_user_reactions(self, interaction: discord.Interaction, status: str, chance: int = 20):
+        user_id = interaction.user.id
+
+        if chance < 1 or chance > 100:
+            await interaction.response.send_message("❌ 機率必須介於 1 到 100 之間！", ephemeral=True)
+            return
+
+        is_enabled = True if status == "on" else False
+        
+        self.user_configs[user_id] = {
+            "enabled": is_enabled,
+            "chance": chance
+        }
+
+        status_text = "🟢 **已開啟**" if is_enabled else "🔴 **已關閉**"
+        
+        embed = discord.Embed(
+            title="✨ 個人隨機反應設定更新",
+            description=f"👤 **設定對象：** {interaction.user.mention}\n"
+                        f"📊 **目前狀態：** {status_text}\n"
+                        f"🎲 **專屬機率：** `{chance}%`",
+            color=discord.Color.green() if is_enabled else discord.Color.red()
+        )
+        embed.set_footer(text="現在你在任何頻道發言，機器人都會根據你個人的設定來幫你貼表情囉！")
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        # 排除機器人自己的訊息
+        if message.author.bot:
+            return
+
+        # 取得發言者的個人設定，若無設定則預設為關閉
+        user_setting = self.user_configs.get(message.author.id, {"enabled": False, "chance": 20})
+
+        if not user_setting["enabled"]:
+            return
+
+        # 🎲 進行個人專屬的機率抽獎
+        roll = random.randint(1, 100)
+        if roll <= user_setting["chance"]:
+            try:
+                # 🎯 核心修正：使用 random.choice 精準挑選「唯一一個」表情，不再使用迴圈
+                chosen_emoji = random.choice(self.emoji_pool)
+                await message.add_reaction(chosen_emoji)
+            except Exception as e:
+                print(f"隨機反應貼上失敗: {e}")
+
+# 載入 Cog
+async def setup(bot: commands.Bot):
+    await bot.add_cog(RandomReactions(bot))
