@@ -1,0 +1,121 @@
+import discord
+from discord import app_commands, ui
+from discord.ext import commands
+import random
+import asyncio
+
+# === A. 抽獎按鈕與登記邏輯 ===
+class GiveawayView(ui.View):
+    def __init__(self, timeout: int):
+        # timeout 設定為 None，避免按鈕因為時間到而失效（由我們自己的非同步任務控制）
+        super().__init__(timeout=None)
+        # 用 set 儲存參加者的使用者 ID，防止重複登記
+        self.participants = set()
+
+    # 建立一個綠色的登記按鈕
+    @ui.button(label="參加", style=discord.ButtonStyle.green, custom_id="join_giveaway")
+    async def join_button(self, interaction: discord.Interaction, button: ui.Button):
+        user_id = interaction.user.id
+        
+        if user_id in self.participants:
+            # ephemeral=True 代表訊息只有點擊的人看得到，不會洗頻
+            await interaction.response.send_message("❌ 你已經登記過囉！無法重複參加。", ephemeral=True)
+        else:
+            self.participants.add(user_id)
+            # 更新按鈕上的標籤顯示目前人數
+            button.label = f"參加 ({len(self.participants)}人)"
+            
+            # 更新原本的抽獎卡片訊息
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send_message("✅ 成功登記抽獎！祝你中獎！", ephemeral=True)
+
+
+# === B. 核心 Cog 模組 ===
+class Giveaway(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    # 斜線指令：/giveaway 獎品:名稱 時間:秒數 中獎人數:數字
+    @app_commands.command(name="giveaway", description="發起一個定時自動開獎的抽獎活動")
+    @app_commands.describe(
+        prize="要抽的獎品名稱",
+        seconds="多少秒後自動開獎 (例如: 60)",
+        winners_count="要抽出幾個中獎人 (預設 1 人)"
+    )
+    async def giveaway(self, interaction: discord.Interaction, prize: str, seconds: int, winners_count: int = 1):
+        if seconds <= 0:
+            await interaction.response.send_message("❌ 時間必須大於 0 秒！", ephemeral=True)
+            return
+        if winners_count <= 0:
+            await interaction.response.send_message("❌ 中獎人數必須大於 0 人！", ephemeral=True)
+            return
+
+        # 1. 建立抽獎活動的精美卡片 (Embed)
+        embed = discord.Embed(
+            title="🎁 好康抽獎活動開始啦！",
+            description=f"**獎品項目：**  **{prize}** \n"
+                        f"**中獎名額：** {winners_count} 名\n"
+                        f"**開獎時間：** <t:{int(interaction.created_at.timestamp() + seconds)}:R> (自動開獎)\n\n"
+                        f"點擊下方按鈕即可參加登記！",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text=f"由 {interaction.user.display_name} 發起")
+
+        # 2. 實例化按鈕介面
+        view = GiveawayView(timeout=seconds)
+        
+        # 發送抽獎卡片
+        await interaction.response.send_message(embed=embed, view=view)
+        
+        # 3. 取得剛才發送的訊息物件，以便後續開獎時修改內容
+        msg = await interaction.original_response()
+
+        # 4. 在背景啟動非同步倒數任務，不卡死主程式
+        asyncio.create_task(self.run_giveaway_timer(msg, seconds, prize, winners_count, view))
+
+    # 負責後台倒數與自動開獎的異步函式
+    async def run_giveaway_timer(self, msg: discord.Message, seconds: int, prize: str, winners_count: int, view: GiveawayView):
+        # 進行 asyncio 等待
+        await asyncio.sleep(seconds)
+
+        # 時間到，將按鈕禁用（Disabled）
+        for item in view.children:
+            item.disabled = True
+        
+        # 取得最終參加名單
+        participants_list = list(view.participants)
+
+        # 檢查人數是否足夠
+        if not participants_list:
+            end_embed = discord.Embed(
+                title="🎁 抽獎活動已結束",
+                description=f"**獎品：** {prize}\n❌ 殘念！因為沒有人參加，所以本次抽獎取消。",
+                color=discord.Color.red()
+            )
+            await msg.edit(embed=end_embed, view=view)
+            return
+
+        # 如果參加人數比要抽的人數少，自動調整中獎人數
+        actual_winners_count = min(winners_count, len(participants_list))
+        
+        # 隨機抽取中獎者
+        winners_ids = random.sample(participants_list, actual_winners_count)
+        winners_mentions = [f"<@{uid}>" for uid in winners_ids]
+
+        # 5. 更新抽獎卡片為「已結束狀態」
+        end_embed = discord.Embed(
+            title="🎉 抽獎活動圓滿結束！ 🎉",
+            description=f"**獎品項目：** **{prize}**\n"
+                        f"**總參加人數：** {len(participants_list)} 人\n\n"
+                        f"🏆 **幸運中獎者：**\n{', '.join(winners_mentions)}",
+            color=discord.Color.green()
+        )
+        await msg.edit(embed=end_embed, view=view)
+
+        # 6. 在頻道直接發一則訊息公佈並 @中獎人
+        announcement = f"🥳 恭喜 {', '.join(winners_mentions)} 抽中了 **{prize}**！請私訊發起人領獎！"
+        await msg.channel.send(announcement)
+
+# 掛載到總指揮官
+async def setup(bot):
+    await bot.add_cog(Giveaway(bot))
