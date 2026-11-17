@@ -1,0 +1,85 @@
+import discord
+from discord import app_commands
+from discord.ext import commands
+from datetime import datetime
+
+class FunIndex(commands.Cog):
+
+    def __init__(self, client: commands.Bot):
+        self.client = client
+
+    # ==========================================
+    # === 🌸 斜線指令：/男娘指數 ===
+    # ==========================================
+    @app_commands.command(name="男娘指數", description="分析自己或指定成員今天的男娘（偽娘）指數！")
+    @app_commands.describe(member="想要分析的成員（留空則檢測自己）")
+    async def femboy_index(self, interaction: discord.Interaction, member: discord.Member = None):
+        target = member or interaction.user
+        target_id = target.id
+        
+        # 取得今天的日期數位特徵（同人同天結果固定、午夜刷新）
+        today_num = int(datetime.now().strftime("%Y%m%d"))
+        index_score = (target_id + today_num) % 101
+        
+        if index_score <= 15:
+            evaluation = "🗿 **純度 100% 剛猛鐵漢**\n鋼鐵般的直男氣息！你的字典裡沒有裙子和絲襪，只有汗水與肌肉，是極致的硬漢代表。"
+        elif index_score <= 40:
+            evaluation = "👔 **普通正常好青年**\n普通的陽光大男孩，舉手投足都很正常。不過偶爾在網路上看到可愛的小正太，內心深處會泛起一絲波瀾。"
+        elif index_score <= 70:
+            evaluation = "💅 **男娘潛力股（潛伏期）**\n骨骼精奇，體型纖細。如果穿上裙子、戴上假髮、打開變聲器，估計大半個伺服器的漢子都要對你瘋狂獻殷勤了！"
+        elif index_score <= 90:
+            evaluation = "👗 **大鳳女裝大佬（輕熟期）**\n衣服一換，誰都不愛！你已經掌握了男娘的核心精髓，講話開始自帶『UwU』，絲襪和短裙已經是你的日常戰袍。"
+        else:
+            evaluation = "🌸 **終極究極·不科學究極男娘（完全體）**\n超越性別界限的終極存在！你一開口，全場融化；你一回頭，猛男落淚。全服的至尊大佬都搶著要跟你結婚！"
+
+        embed = discord.Embed(
+            title="🌸 伺服器男娘（Femboy）大數據分析",
+            description=f"正在透過量子力學分析 {target.mention} 今天的靈魂純度...",
+            color=discord.Color.from_rgb(255, 182, 193)
+        )
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.add_field(name="📊 當前男娘指數", value=f"✨ **`{index_score} %`** ✨", inline=False)
+        embed.add_field(name="📝 系統終極測評", value=evaluation, inline=False)
+        embed.set_footer(text="📊 檢測時間：今天 • 數據每日午夜自動刷新")
+
+        await interaction.response.send_message(embed=embed)
+
+    # ==========================================
+    # === 🌈 斜線指令：/臭甲指數 ===
+    # ==========================================
+    @app_commands.command(name="臭甲指數", description="分析自己或指定成員今天的臭甲（Gay）指數！")
+    @app_commands.describe(member="想要分析的成員（留空則檢測自己）")
+    async def gay_index(self, interaction: discord.Interaction, member: discord.Member = None):
+        target = member or interaction.user
+        target_id = target.id
+        
+        # 加上偏移系數防止兩項檢測數字撞號
+        today_num = int(datetime.now().strftime("%Y%m%d"))
+        index_score = (target_id * 3 + today_num) % 101
+        
+        if index_score <= 15:
+            evaluation = "🦾 **純情深山鋼鐵直男**\n鋼鐵一般的筆直靈魂！在你眼裡只有女生和兄弟，完全沒有任何『擊劍』的可能。非常安全！"
+        elif index_score <= 40:
+            evaluation = "🤝 **純潔好兄弟**\n一般的社群好青年，和兄弟勾肩搭背是很正常的。但如果兄弟突然湊得很近，你心跳會漏一拍。"
+        elif index_score <= 70:
+            evaluation = "🏳️‍🌈 **隱性擊劍愛好者（潛伏期）**\n嘴上不說，內心狂熱！你的手機相簿裡是不是藏了一些猛男桌布？注意了，你隨時有加入『甲級聯賽』的可能。"
+        elif index_score <= 90:
+            evaluation = "🧼 **肥皂狂熱收藏家**\n洗澡時最期待撿肥皂的時刻！你對好兄弟的關心已經超越了友誼，群組裡的漢子們看到你進語音都會自覺地夾緊雙腿。"
+        else:
+            evaluation = "🍑 **究極傲世甲皇（完全體）**\n臭氣沖天！甲光四射！你已經是全伺服器的『甲級戰犯』。你的眼神能直接把直男看彎，全服的男孩子都是你的涉獵獵物！"
+
+        embed = discord.Embed(
+            title="🌈 伺服器臭甲（Gay）大數據雷達分析",
+            description=f"正在透過量子力學檢測 {target.mention} 靈魂深處的擊劍渴望...",
+            color=discord.Color.from_rgb(147, 112, 219)
+        )
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.add_field(name="📊 當前臭甲指數", value=f"✨ **`{index_score} %`** ✨", inline=False)
+        embed.add_field(name="📝 系統終極測評", value=evaluation, inline=False)
+        embed.set_footer(text="📊 檢測時間：今天 • 數據每日午夜自動刷新")
+
+        await interaction.response.send_message(embed=embed)
+
+# === 👑 核心加載入口：讓總指揮官 main.py 自動載入本模組 ===
+async def setup(client: commands.Bot):
+    await client.add_cog(FunIndex(client))
