@@ -1,0 +1,81 @@
+import discord
+from discord import app_commands
+from discord.ext import commands
+from datetime import datetime
+
+class LoveTest(commands.Cog):
+
+    def __init__(self, client: commands.Bot):
+        self.client = client
+
+    # ==========================================
+    # === 💖 斜線指令：/愛情測試 ===
+    # ==========================================
+    @app_commands.command(name="愛情測試", description="計算你和伺服器成員的愛情指數")
+    @app_commands.describe(member="想要選擇的對象")
+    async def love_test(self, interaction: discord.Interaction, member: discord.Member):
+        user1 = interaction.user
+        user2 = member
+
+        # 1. 特殊情境彩蛋：測試自己
+        if user1.id == user2.id:
+            embed = discord.Embed(
+                title="💗 愛情指數（Femboy）大數據分析",
+                description=f"正在透過量子力學分析愛情指數...",
+                color=discord.Color.from_rgb(255, 105, 180)
+            )
+            embed.set_thumbnail(url=user1.display_avatar.url)
+            embed.add_field(name="💗 愛情指數", value="✨ **`1000 %`（突破天際）** ✨", inline=False)
+            embed.add_field(
+                name="📝 系統終極測評",
+                value="🪞 **自戀無敵·水仙花轉世**\n這世上沒有人比你更愛你自己了！不需要別人，你跟你的左右手就是全伺服器最恩愛的情侶。",
+                inline=False
+            )
+            embed.set_footer(text="📊 檢測時間：今天 • 數據每日午夜自動刷新")
+            await interaction.response.send_message(embed=embed)
+            return
+
+        # 2. 計算契合度（使用相加確保 A測B 與 B測A 的結果完全一致，並乘上質數避免與其他指數撞號）
+        today_num = int(datetime.now().strftime("%Y%m%d"))
+        love_score = ((user1.id + user2.id) * 7 + today_num) % 101
+
+        # 3. 特殊情境微調：如果對象是機器人
+        if user2.bot:
+            evaluation = (
+                f"🤖 **賽博朋克·人機之戀（契合度 {love_score}%）**\n"
+                "跨越物種與次元壁的禁忌之愛！雖然它沒有體溫，但它的 CPU 每天都在為你發燙，建議直接原地與伺服器主機結婚。"
+            )
+        elif love_score <= 15:
+            evaluation = "💔 **宿命死敵·水火不容**\n你們的磁場完全排斥！靠近彼此超過三公尺就會發生量子爆炸，建議在語音頻道裡保持安全社交距離。"
+        elif love_score <= 40:
+            evaluation = "🧊 **點頭之交·純純路人**\n比白開水還要平淡的關係。你們之間唯一的共同點，大概就是都在同一個 Discord 伺服器裡潛水。"
+        elif love_score <= 70:
+            evaluation = "🤝 **友達以上·戀人未滿**\n氣氛開始有點曖昧囉！雖然嘴上都喊著『好兄弟』或『好閨蜜』，但深夜私訊聊天的頻率已經說明了一切。"
+        elif love_score <= 90:
+            evaluation = "🔥 **乾柴烈火·天作之合**\n粉紅泡泡已經滿出螢幕了！你們的默契高得嚇人，連呼吸的頻率都一模一樣，群友們已經準備好墨鏡跟隨禮金了。"
+        else:
+            evaluation = "💍 **前世今生·靈魂伴侶（完全體）**\n月老親自用鋼筋幫你們綁的紅線！你們是全伺服器公認的模範夫妻，現在、立刻、馬上給我原地去民政局登記！"
+
+        # 4. 製作進度條視覺效果
+        filled_hearts = round(love_score / 10)
+        progress_bar = "❤️" * filled_hearts + "🖤" * (10 - filled_hearts)
+
+        embed = discord.Embed(
+            title="💘 伺服器量子愛情雷達分析",
+            description=f"正在透過大數據演算 {user1.mention} 與 {user2.mention} 今天的紅線指數...",
+            color=discord.Color.from_rgb(255, 105, 180)
+        )
+        embed.set_thumbnail(url=user2.display_avatar.url)
+        embed.add_field(
+            name="💗 當前愛情契合度",
+            value=f"✨ **`{love_score} %`** ✨\n{progress_bar}",
+            inline=False
+        )
+        embed.add_field(name="📝 系統終極測評", value=evaluation, inline=False)
+        embed.set_footer(text="📊 檢測時間：今天 • 數據每日午夜自動刷新")
+
+        await interaction.response.send_message(embed=embed)
+
+# === 👑 核心加載入口：讓總指揮官 main.py 自動載入本模組 ===
+async def setup(client: commands.Bot):
+    await client.add_cog(LoveTest(client))
